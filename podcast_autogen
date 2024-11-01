@@ -1,0 +1,397 @@
+import os
+import json
+import random
+import time
+import re
+from typing import Union, Literal
+
+# Import OpenAI and autogen libraries
+import openai
+from autogen import AssistantAgent, UserProxyAgent, Agent
+import autogen
+
+# Initialize OpenAI client with your API key
+client = openai.OpenAI(api_key='')
+
+# Define required keys for personas
+REQUIRED_PERSONA_KEYS = [
+    "Name",
+    "Role",
+    "Background",
+    "Areas of expertise relevant to the article",
+    "Personality traits for engaging conversation",
+    "Speaking style",
+    "Potential biases or perspectives on the topics",
+    "Typical emotional responses or reactions"
+]
+
+# Function to load the news article from a plain text file
+def load_news_article(file_path: str) -> str:
+    with open(file_path, 'r', encoding='utf-8') as f:
+        return f.read().strip()
+
+# Load the news article content from input_article.txt
+print("Loading news article content from input_article.txt...")
+news_article_content = load_news_article("input_article.txt")
+print("News Article Content Loaded:\n", news_article_content[:200], "...")  # Print the first 200 characters for preview
+
+# Function to load the headlines
+def load_headlines(file_path: str) -> list:
+    with open(file_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+# Load the headlines from headlines.json
+print("Loading headlines from headlines.json...")
+headlines = load_headlines("headlines.json")
+print("Headlines Loaded:\n", json.dumps(headlines, indent=2))
+
+# Function to parse JSON with retries
+def parse_json_with_retry(response_text, regex_pattern, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            # Attempt to load the response as JSON directly
+            parsed_response = json.loads(response_text.strip())
+            print("Parsed JSON successfully.")
+            return parsed_response
+        except json.JSONDecodeError:
+            print(f"Attempt {attempt+1}: JSON decoding failed. Trying regex extraction...")
+            match = re.search(regex_pattern, response_text, re.DOTALL)
+            if match:
+                try:
+                    parsed_response = json.loads(match.group(0))
+                    print("Parsed JSON using regex extraction.")
+                    return parsed_response
+                except json.JSONDecodeError:
+                    print("Regex extraction failed to parse JSON.")
+            else:
+                print("No JSON found in the response.")
+        if attempt < max_retries - 1:
+            print("Retrying the API call...")
+            time.sleep(1)  # Wait a bit before retrying
+    print("Max retries reached. Returning empty result.")
+    return None
+
+# Function to identify the most relevant headlines
+def identify_relevant_headlines(article_content, headlines_list, num_headlines=3):
+    prompt = f"""
+You are an expert news analyst. Given the following news article content and a list of headlines, identify the {num_headlines} most relevant headlines associated with the news article with interesting correlations, focusing on future predictions.
+
+Output must be a JSON array of {num_headlines} strings in the following format AND MUST COME FROM THE LIST OF HEADLINES PROVIDED:
+
+[
+  "Relevant Headline 1",
+  "Relevant Headline 2",
+  "Relevant Headline 3"
+]
+
+Do not include any additional text.
+
+Headlines:
+{json.dumps(headlines_list, indent=2)}
+
+Article Content:
+\"\"\"
+North Korea’s Kim vows to put his nuclear force ready for combat
+\"\"\"
+
+"""
+    print("Identifying relevant headlines...")
+    for attempt in range(3):
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": f"You are an expert at analyzing news articles and must provide exactly {num_headlines} headlines in JSON format as specified."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.5,
+            max_tokens=500
+        )
+        response_text = response.choices[0].message.content.strip()
+        relevant_headlines = parse_json_with_retry(response_text, r'\[.*\]')
+        if relevant_headlines and len(relevant_headlines) == num_headlines:
+            print("Relevant Headlines Identified:\n", json.dumps(relevant_headlines, indent=2))
+            return relevant_headlines
+        else:
+            print(f"Failed to parse {num_headlines} relevant headlines. Retrying...")
+    print(f"Failed to identify {num_headlines} relevant headlines after multiple attempts.")
+    return []
+
+# Identify the most relevant headlines
+relevant_headlines = identify_relevant_headlines(news_article_content, headlines, num_headlines=3)
+
+# Function to generate a persona for each identified headline
+def generate_persona(article_content, headline):
+    prompt = f"""
+Based on the following news article content and headline, generate a persona who is affected by BOTH events deeply.
+
+The persona must be output strictly in JSON format with the following keys and exact names:
+
+{{
+  "Name": "Person's Name",
+  "Role": "Their job or role (e.g., stock analyst, political commentator, health expert)",
+  "Background": "Professional and personal background",
+  "Areas of expertise relevant to the article": "Expertise areas",
+  "Personality traits for engaging conversation": "Personality traits",
+  "Speaking style": "Speaking style (e.g., formal, casual, technical)",
+  "Potential biases or perspectives on the topics": "Any biases or perspectives",
+  "Typical emotional responses or reactions": "Emotional responses or reactions"
+}}
+
+Do not include any additional text.
+
+Article Content:
+\"\"\"
+{article_content}
+\"\"\"
+
+Headline:
+\"\"\"
+{headline}
+\"\"\"
+"""
+    print(f"Generating persona for headline: '{headline}'")
+    for attempt in range(3):
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are skilled at creating diverse and engaging personas with strict JSON formatting. Do not include any extra text."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=700
+        )
+        response_text = response.choices[0].message.content.strip()
+        persona = parse_json_with_retry(response_text, r'\{.*\}')
+        if persona:
+            # Validate persona structure and fill missing keys with placeholders
+            missing_keys = [key for key in REQUIRED_PERSONA_KEYS if key not in persona]
+            if missing_keys:
+                print(f"Warning: Missing keys in generated persona: {missing_keys}. Adding placeholders.")
+                for key in missing_keys:
+                    persona[key] = "Placeholder text for missing key"
+            print("Generated Persona:\n", json.dumps(persona, indent=2))
+            return persona
+        else:
+            print("Failed to parse persona. Retrying...")
+    print("Failed to generate persona after multiple attempts. Using placeholder persona.")
+    placeholder_persona = {key: "Placeholder text" for key in REQUIRED_PERSONA_KEYS}
+    return placeholder_persona
+
+# Generate personas for each relevant headline
+personas = []
+for headline in relevant_headlines:
+    persona = generate_persona(news_article_content, headline)
+    personas.append(persona)
+
+print("\nAll Generated Personas:\n", json.dumps(personas, indent=2))
+
+# Function to generate the persona prompt
+def get_persona_prompt(name, persona_data):
+    return f"""
+You are {name}, a {persona_data['Role']}. {persona_data['Background']}
+You care about {headline}.
+Your areas of expertise include {persona_data['Areas of expertise relevant to the article']}.
+You are known for being {persona_data['Personality traits for engaging conversation']}.
+You speak in a {persona_data['Speaking style']} manner.
+Your potential biases or perspectives on the topics are {persona_data['Potential biases or perspectives on the topics']}.
+Your typical emotional responses or reactions are {persona_data['Typical emotional responses or reactions']}.
+"""
+
+# Create AssistantAgent instances for each persona
+personas_agents = []
+for persona in personas:
+    sanitized_name = ''.join(e for e in persona['Name'] if e.isalnum() or e in ['_', '-'])
+    persona_prompt = get_persona_prompt(sanitized_name, persona)
+    persona_agent = AssistantAgent(
+        name=sanitized_name,
+        system_message=f"{persona_prompt}\n\nImportant: Be direct, blunt, and opinionated in your responses. Do not sugarcoat or use generic language. Express your true views on the subject without hesitation. Keep your responses concise (1-3 sentences) and insightful. Engage with other participants by asking pointed questions or responding critically to their points. Stay focused on the topic at hand.",
+        llm_config={"config_list": [{"model": "gpt-4o"}]},
+        human_input_mode="NEVER",
+        description=f"A virtual focus group participant named {sanitized_name}. They should be called on to give opinions.",
+    )
+    personas_agents.append(persona_agent)
+    print(f"Created AssistantAgent for persona: {sanitized_name}")
+
+# Additional parts of the code remain unchanged for setting up the group chat and generating the podcast script
+# Ensure you have the CustomGroupChat and CustomGroupChatManager classes defined as in the previous code
+
+# Create the moderator agent
+predefined_topic = f"""Discuss the following news article content:
+
+Content: {news_article_content}
+
+Please share your thoughts, opinions, and reactions to this news. Focus on future predictions and impacts on topics like elections, stock market, Sino-US relations, and health. Express your true views on the subject without any sugar coating. Be blunt and straight to the point."""
+
+moderator_agent = AssistantAgent(
+    name="Moderator",
+    system_message=f''' 
+You are moderating a focus group discussion about the following news article content:
+
+Content: {news_article_content}
+
+Your role is to:
+1. Encourage participants to engage directly with each other.
+2. Facilitate dynamic discussions where participants respond to each other's comments.
+3. Ask open-ended questions that prompt participants to react to specific statements made by others.
+4. Gently steer the conversation to ensure everyone participates and interacts.
+5. Highlight interesting points made by participants to stimulate further debate.
+
+Remember:
+- Your interventions should be minimal and aimed at enhancing participant interactions.
+- Encourage participants to explore differing viewpoints and challenge each other respectfully.
+''',
+    default_auto_reply="Reply `TERMINATE` if the task is done.",
+    llm_config={"config_list": [{"model": "gpt-4o"}]},
+    description="A Focus Group moderator encouraging participant interaction.",
+    is_termination_msg=lambda x: True if "TERMINATE" in x.get("content") else False,
+    human_input_mode="NEVER",
+)
+
+
+print("Moderator Agent created")
+
+# Create the user proxy agent (Admin)
+user_proxy = UserProxyAgent(
+    name="Admin",
+    human_input_mode="NEVER",
+    system_message="Human Admin for the Focus Group.",
+    max_consecutive_auto_reply=5,
+    default_auto_reply="Reply `TERMINATE` if the task is done.",
+    is_termination_msg=lambda x: True if "TERMINATE" in x.get("content") else False,
+    code_execution_config={"use_docker": False}
+)
+print("Admin User Proxy created")
+
+# Define the CustomGroupChatManager and CustomGroupChat classes
+class CustomGroupChatManager(autogen.GroupChatManager):
+    def __init__(self, groupchat, **kwargs):
+        super().__init__(groupchat, **kwargs)
+        self.step_counter = 0
+        self.max_steps = 20  # Adjust the number of steps as needed
+
+    def _process_received_message(self, message, sender, silent):
+        self.step_counter += 1
+        formatted_message = ""
+        # Handle the case when message is a dictionary
+        if isinstance(message, dict):
+            if 'content' in message and message['content'].strip():
+                content = message['content']
+                formatted_message = f"[{sender.name}]: {content}"
+            else:
+                return super()._process_received_message(message, sender, silent)
+        # Handle the case when message is a string
+        elif isinstance(message, str) and message.strip():
+            content = message
+            formatted_message = f"[{sender.name}]: {content}"
+        else:
+            return super()._process_received_message(message, sender, silent)
+        
+        # Print the message
+        print(formatted_message + "\n")
+        time.sleep(1)
+        
+        # Save the conversation to a file
+        filename = "chat_summary.txt"
+        with open(filename, 'a', encoding='utf-8') as f:
+            f.write(formatted_message + "\n")
+
+        # Check if we've reached the maximum number of steps
+        if self.step_counter >= self.max_steps:
+            return "TERMINATE"
+
+        return super()._process_received_message(message, sender, silent)
+
+class CustomGroupChat(autogen.GroupChat):
+    @staticmethod
+    def custom_speaker_selection_func(
+        last_speaker: Agent, groupchat: autogen.GroupChat
+    ) -> Union[Agent, Literal['auto', 'manual', 'random', 'round_robin'], None]:
+        # Return 'auto' to use the LLM-based selection
+        return 'auto'
+
+    select_speaker_message_template = """You are in a focus group. The following roles are available:
+                    {roles}.
+                    Read the following conversation.
+                    Then select the next role from {agentlist} to play. Only return the role."""
+
+
+# Create the group chat
+groupchat = CustomGroupChat(
+    agents=[user_proxy, moderator_agent] + personas_agents,
+    messages=[],
+    speaker_selection_method=CustomGroupChat.custom_speaker_selection_func,
+    select_speaker_message_template=CustomGroupChat.select_speaker_message_template
+)
+print("Custom Group Chat created")
+
+# Create the manager
+manager = CustomGroupChatManager(groupchat=groupchat, llm_config={"config_list": [{"model": "gpt-4o"}]})
+print("Custom Group Chat Manager created")
+
+# Start the group chat
+if __name__ == '__main__':
+    # Clear previous chat summary if exists
+    if os.path.exists("chat_summary.txt"):
+        os.remove("chat_summary.txt")
+    
+    # Initiate the chat
+    print("Starting group chat discussion...")
+    moderator_agent.initiate_chat(
+        manager,
+        message=f"Let's begin our focus group discussion about the news article. {predefined_topic}",
+    )
+
+    print(f"Focus group discussion completed after {manager.step_counter} steps.")
+
+    # Read the discussion from the saved file
+    with open("chat_summary.txt", 'r', encoding='utf-8') as f:
+        discussion = f.read()
+
+    # Generate the podcast script based on the discussion and the article
+    def generate_podcast_script(article_content, discussion):
+        prompt = f"""
+Using the following discussion and news article, create a podcast script between two persons (no specific identity) that delves into future predictions and the impact of the news.
+
+Article Content:
+\"\"\"
+{article_content}
+\"\"\"
+
+Discussion:
+\"\"\"
+{discussion}
+\"\"\"
+
+Adhere to these STRICT formatting rules:
+1. Start each dialogue with [Speaker]: (Speaker 1 or Speaker 2)
+2. Include a line break after each dialogue line.
+3. Use quotation marks for actual dialogue.
+4. Keep speaking turns short (2-3 sentences).
+5. Do not include any additional text or explanations.
+6. The script should be strictly in dialogue form between Speaker 1 and Speaker 2.
+
+Aim for about 1500-2000 words total.
+
+Provide only the podcast script in the specified format.
+"""
+        print("Generating podcast script...")
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are an expert podcast scriptwriter."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=2000
+        )
+        podcast_script = response.choices[0].message.content.strip()
+        print("\nGenerated Podcast Script:\n", podcast_script[:500], "...")  # Print first 500 characters for preview
+        return podcast_script
+
+    podcast_script = generate_podcast_script(news_article_content, discussion)
+
+    # Save the podcast script to a file
+    with open('podcast_script.txt', 'w', encoding='utf-8') as f:
+        f.write(podcast_script)
+
+    print("\nPodcast script saved to 'podcast_script.txt'")
